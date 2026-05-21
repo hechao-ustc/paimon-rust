@@ -18,16 +18,21 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use arrow::datatypes::DataType as ArrowDataType;
 use arrow::pyarrow::{FromPyArrow, ToPyArrow};
 use datafusion::catalog::CatalogProvider;
+use datafusion::logical_expr::{Signature, TypeSignature, Volatility};
 use datafusion_ffi::catalog_provider::FFI_CatalogProvider;
 use datafusion_ffi::proto::logical_extension_codec::FFI_LogicalExtensionCodec;
 use paimon::{CatalogFactory, Options};
 use paimon_datafusion::{PaimonCatalogProvider, SQLContext};
+use pyo3::exceptions::PyRuntimeWarning;
 use pyo3::prelude::*;
 use pyo3::types::PyCapsule;
 
+use crate::blob::PyBlobReaderRegistry;
 use crate::error::{df_to_py_err, to_py_err};
+use crate::udf::{build_python_scalar_udf, udf, PyPythonScalarUDFObject};
 use paimon_datafusion::runtime::runtime;
 
 fn build_paimon_catalog_provider(
@@ -93,28 +98,78 @@ pub struct PySQLContext {
     inner: SQLContext,
 }
 
+impl PySQLContext {
+    fn register_video_snapshot_builtin(&self, py: Python<'_>) -> PyResult<()> {
+        let functions = py.import("pypaimon_rust.functions")?;
+        let blob_reader_registry = Py::new(
+            py,
+            PyBlobReaderRegistry::new(self.inner.blob_reader_registry()),
+        )?;
+        let func = functions
+            .getattr("_make_video_snapshot")?
+            .call1(("PNG", blob_reader_registry))?
+            .unbind();
+        let signature = Signature::one_of(
+            vec![
+                TypeSignature::Exact(vec![ArrowDataType::Binary]),
+                TypeSignature::Exact(vec![ArrowDataType::Binary, ArrowDataType::Int32]),
+                TypeSignature::Exact(vec![ArrowDataType::Binary, ArrowDataType::Int64]),
+            ],
+            Volatility::Volatile,
+        );
+        let udf = build_python_scalar_udf(
+            "video_snapshot".to_string(),
+            func,
+            ArrowDataType::Binary,
+            signature,
+        );
+        self.inner.ctx().register_udf(udf);
+        Ok(())
+    }
+
+    fn warn_video_snapshot_registration_failure(py: Python<'_>, err: PyErr) {
+        if let Ok(warnings) = py.import("warnings") {
+            let category = py.get_type::<PyRuntimeWarning>();
+            let _ = warnings.call_method1(
+                "warn",
+                (
+                    format!("video_snapshot built-in could not be registered: {err}"),
+                    category,
+                ),
+            );
+        }
+    }
+}
+
 #[pymethods]
 impl PySQLContext {
     #[new]
-    fn new() -> Self {
-        Self {
+    fn new(py: Python<'_>) -> PyResult<Self> {
+        let ctx = Self {
             inner: SQLContext::new(),
+        };
+        if let Err(err) = ctx.register_video_snapshot_builtin(py) {
+            Self::warn_video_snapshot_registration_failure(py, err);
         }
+        Ok(ctx)
     }
 
     fn register_catalog(
         &mut self,
+        py: Python<'_>,
         catalog_name: String,
         catalog_options: HashMap<String, String>,
     ) -> PyResult<()> {
         let rt = runtime();
-        rt.block_on(async {
-            let options = Options::from_map(catalog_options);
-            let catalog = CatalogFactory::create(options).await.map_err(to_py_err)?;
-            self.inner
-                .register_catalog(catalog_name, catalog)
-                .await
-                .map_err(df_to_py_err)
+        py.detach(|| {
+            rt.block_on(async {
+                let options = Options::from_map(catalog_options);
+                let catalog = CatalogFactory::create(options).await.map_err(to_py_err)?;
+                self.inner
+                    .register_catalog(catalog_name, catalog)
+                    .await
+                    .map_err(df_to_py_err)
+            })
         })
     }
 
@@ -148,11 +203,18 @@ impl PySQLContext {
             .map_err(df_to_py_err)
     }
 
+    fn register_udf(&self, udf: &PyPythonScalarUDFObject) -> PyResult<()> {
+        self.inner.ctx().register_udf(udf.datafusion_udf());
+        Ok(())
+    }
+
     fn sql(&self, py: Python<'_>, sql: String) -> PyResult<Vec<Py<PyAny>>> {
         let rt = runtime();
-        let batches = rt.block_on(async {
-            let df = self.inner.sql(&sql).await.map_err(df_to_py_err)?;
-            df.collect().await.map_err(df_to_py_err)
+        let batches = py.detach(|| {
+            rt.block_on(async {
+                let df = self.inner.sql(&sql).await.map_err(df_to_py_err)?;
+                df.collect().await.map_err(df_to_py_err)
+            })
         })?;
         batches
             .iter()
@@ -164,7 +226,9 @@ impl PySQLContext {
 pub fn register_module(py: Python<'_>, m: &Bound<'_, PyModule>) -> PyResult<()> {
     let this = PyModule::new(py, "datafusion")?;
     this.add_class::<PaimonCatalog>()?;
+    this.add_class::<PyPythonScalarUDFObject>()?;
     this.add_class::<PySQLContext>()?;
+    this.add_function(wrap_pyfunction!(udf, &this)?)?;
     m.add_submodule(&this)?;
     py.import("sys")?
         .getattr("modules")?

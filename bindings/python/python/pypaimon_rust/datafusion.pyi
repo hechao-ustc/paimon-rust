@@ -15,13 +15,54 @@
 # specific language governing permissions and limitations
 # under the License.
 
-from typing import Any, Dict, List
+from typing import Any, Callable, Dict, List, Optional, Sequence, TypeAlias, Union
 
 import pyarrow
+
+ArrowTypeLike: TypeAlias = Union[pyarrow.DataType, pyarrow.Field, str]
+InputFieldsLike: TypeAlias = Union[ArrowTypeLike, Sequence[ArrowTypeLike]]
+VolatilityLike: TypeAlias = Union[str, Any]
 
 class PaimonCatalog:
     def __init__(self, catalog_options: Dict[str, str]) -> None: ...
     def __datafusion_catalog_provider__(self, session: Any) -> object: ...
+
+class PythonScalarUDF:
+    def __init__(
+        self,
+        name: str,
+        func: Callable[..., pyarrow.Array],
+        input_fields: InputFieldsLike,
+        return_field: ArrowTypeLike,
+        volatility: VolatilityLike,
+    ) -> None: ...
+    @staticmethod
+    def udf(
+        func: Callable[..., pyarrow.Array],
+        input_fields: InputFieldsLike,
+        return_field: ArrowTypeLike,
+        volatility: VolatilityLike,
+        name: Optional[str] = None,
+    ) -> "PythonScalarUDF": ...
+    @property
+    def name(self) -> str: ...
+
+def udf(
+    func: Callable[..., pyarrow.Array],
+    input_fields: InputFieldsLike,
+    return_field: ArrowTypeLike,
+    volatility: VolatilityLike,
+    name: Optional[str] = None,
+) -> PythonScalarUDF:
+    """
+    Create a scalar UDF.
+
+    This mirrors DataFusion Python's function-style API:
+    ``udf(func, input_fields, return_field, volatility, name)``.
+    ``input_fields`` and ``return_field`` accept PyArrow DataType or Field
+    values. String type names remain accepted for compatibility.
+    """
+    ...
 
 class SQLContext:
     def __init__(self) -> None: ...
@@ -31,4 +72,5 @@ class SQLContext:
     def set_current_catalog(self, catalog_name: str) -> None: ...
     def set_current_database(self, database_name: str) -> None: ...
     def register_batch(self, name: str, batch: pyarrow.RecordBatch) -> None: ...
+    def register_udf(self, udf: PythonScalarUDF) -> None: ...
     def sql(self, sql: str) -> List[pyarrow.RecordBatch]: ...
