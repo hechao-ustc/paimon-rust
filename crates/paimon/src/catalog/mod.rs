@@ -29,6 +29,7 @@ mod rest;
 use std::collections::HashMap;
 use std::fmt;
 
+use crate::{Error, Result};
 pub use database::*;
 pub use factory::*;
 pub use filesystem::*;
@@ -76,6 +77,22 @@ impl Identifier {
         }
     }
 
+    /// Validate this identifier's database and object names.
+    pub(crate) fn validate(&self) -> Result<()> {
+        Self::validate_database_name(&self.database)?;
+        Self::validate_object_name(&self.object)
+    }
+
+    /// Validate a database name for path-safe catalog use.
+    pub(crate) fn validate_database_name(name: &str) -> Result<()> {
+        validate_identifier_name("database", name)
+    }
+
+    /// Validate an object name for path-safe catalog use.
+    pub(crate) fn validate_object_name(name: &str) -> Result<()> {
+        validate_identifier_name("object", name)
+    }
+
     /// Database name.
     pub fn database(&self) -> &str {
         &self.database
@@ -95,6 +112,28 @@ impl Identifier {
             format!("{}.{}", self.database, self.object)
         }
     }
+}
+
+fn validate_identifier_name(kind: &str, name: &str) -> Result<()> {
+    let invalid = if name.trim().is_empty() {
+        Some("cannot be empty or whitespace")
+    } else if matches!(name, "." | "..") {
+        Some("cannot be '.' or '..'")
+    } else if name.contains('/') || name.contains('\\') {
+        Some("cannot contain path separators")
+    } else if name.chars().any(char::is_control) {
+        Some("cannot contain control characters")
+    } else {
+        None
+    };
+
+    if let Some(reason) = invalid {
+        return Err(Error::IdentifierInvalid {
+            message: format!("{kind} name {reason}: {name:?}"),
+        });
+    }
+
+    Ok(())
 }
 
 impl fmt::Display for Identifier {
@@ -119,7 +158,6 @@ use async_trait::async_trait;
 use crate::api::PagedList;
 use crate::spec::{Partition, Schema, SchemaChange};
 use crate::table::Table;
-use crate::Result;
 
 /// Catalog API for reading and writing metadata (databases, tables) in Paimon.
 ///
@@ -255,5 +293,50 @@ pub trait Catalog: Send + Sync {
             self.list_partitions(identifier).await?,
             None,
         ))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_identifier_validate_should_reject_path_control_names() {
+        for (database, object) in [
+            ("", "table"),
+            ("   ", "table"),
+            (".", "table"),
+            ("..", "table"),
+            ("../escaped", "table"),
+            ("db\\escaped", "table"),
+            ("db\nescaped", "table"),
+            ("db", ""),
+            ("db", "   "),
+            ("db", "."),
+            ("db", ".."),
+            ("db", "../escaped"),
+            ("db", "nested/table"),
+            ("db", "nested\\table"),
+            ("db", "table\0name"),
+        ] {
+            let result = Identifier::new(database, object).validate();
+            assert!(
+                matches!(result, Err(Error::IdentifierInvalid { .. })),
+                "expected invalid identifier for database={database:?}, object={object:?}, got {result:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_identifier_validate_should_allow_system_suffix_and_unicode_names() {
+        let identifier = Identifier::new("analytics", "orders$snapshots");
+        identifier.validate().unwrap();
+        assert_eq!(identifier.database(), "analytics");
+        assert_eq!(identifier.object(), "orders$snapshots");
+
+        let identifier = Identifier::new("数据", "订单");
+        identifier.validate().unwrap();
+        assert_eq!(identifier.database(), "数据");
+        assert_eq!(identifier.object(), "订单");
     }
 }
