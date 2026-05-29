@@ -184,19 +184,31 @@ impl PySQLContext {
         Ok(ctx)
     }
 
+    /// Registers a Paimon catalog under the given name.
+    ///
+    /// `default_database`: omitted / `None` → use `"default"` (back-compat);
+    /// `""` → skip default-db init (for principals without DESCRIBE on `default`);
+    /// `"name"` → use `name`.
+    #[pyo3(signature = (catalog_name, catalog_options, default_database=None))]
     fn register_catalog(
         &mut self,
         py: Python<'_>,
         catalog_name: String,
         catalog_options: HashMap<String, String>,
+        default_database: Option<String>,
     ) -> PyResult<()> {
         let rt = runtime();
         py.detach(|| {
             rt.block_on(async {
                 let options = Options::from_map(catalog_options);
                 let catalog = CatalogFactory::create(options).await.map_err(to_py_err)?;
+                let default_db: Option<String> = match default_database {
+                    None => Some("default".to_string()),
+                    Some(s) if s.is_empty() => None,
+                    Some(s) => Some(s),
+                };
                 self.inner
-                    .register_catalog(catalog_name, catalog)
+                    .register_catalog_with_default_db(catalog_name, catalog, default_db.as_deref())
                     .await
                     .map_err(df_to_py_err)
             })
