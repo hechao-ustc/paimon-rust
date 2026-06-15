@@ -25,7 +25,8 @@
 
 use super::data_file_reader::DataFileReader;
 use super::sort_merge::{
-    DeduplicateMergeFunction, PartialUpdateMergeFunction, SortMergeReaderBuilder,
+    AggregateMergeFunction, DeduplicateMergeFunction, PartialUpdateMergeFunction,
+    SortMergeReaderBuilder,
 };
 use crate::arrow::build_target_arrow_schema;
 use crate::io::FileIO;
@@ -102,6 +103,9 @@ impl KeyValueFileReader {
         merge_engine: MergeEngine,
         table_options: &HashMap<String, String>,
         table_name: &str,
+        merge_output_fields: &[DataField],
+        primary_keys: &[String],
+        sequence_fields: &[String],
     ) -> crate::Result<Box<dyn super::sort_merge::MergeFunction>> {
         match merge_engine {
             MergeEngine::Deduplicate => Ok(Box::new(DeduplicateMergeFunction)),
@@ -112,6 +116,13 @@ impl KeyValueFileReader {
             MergeEngine::FirstRow => Err(Error::Unsupported {
                 message: "KeyValueFileReader does not support merge-engine=first-row; first-row reads should use the non-KV path".to_string(),
             }),
+            MergeEngine::Aggregation => Ok(Box::new(AggregateMergeFunction::new(
+                table_options,
+                table_name,
+                merge_output_fields,
+                primary_keys,
+                sequence_fields,
+            )?)),
         }
     }
 
@@ -264,6 +275,8 @@ impl KeyValueFileReader {
         let table_name = self.config.table_name;
         let table_options = self.config.table_options;
         let predicates = self.config.predicates;
+        let primary_keys = self.config.primary_keys;
+        let sequence_fields = self.config.sequence_fields;
 
         // Build the merge output schema (keys + values, no system columns).
         let mut merge_output_fields: Vec<DataField> = Vec::new();
@@ -328,7 +341,14 @@ impl KeyValueFileReader {
                     user_sequence_indices.clone(),
                     value_indices.clone(),
                     merge_output_schema.clone(),
-                    Self::new_merge_function(merge_engine, &table_options, &table_name)?,
+                    Self::new_merge_function(
+                        merge_engine,
+                        &table_options,
+                        &table_name,
+                        &merge_output_fields,
+                        &primary_keys,
+                        &sequence_fields,
+                    )?,
                 )
                 .build()?;
 
