@@ -17,15 +17,56 @@
 
 use std::sync::Arc;
 
+use arrow::pyarrow::ToPyArrow;
+use futures::TryStreamExt;
 use paimon::spec::Predicate;
 use paimon::table::{DataSplit, Table};
 use paimon_datafusion::runtime::runtime;
-use pyo3::exceptions::PyValueError;
+use pyo3::exceptions::{PyTypeError, PyValueError};
 use pyo3::prelude::*;
 use pyo3::types::{PyBytes, PyDict};
 
 use crate::error::to_py_err;
 use crate::predicate::dict_to_predicate;
+
+/// Apply projection/limit/filter from a config snapshot onto a core ReadBuilder.
+/// Shared by PyTableScan::plan and PyTableRead::read so scan and read stay consistent.
+fn apply_read_config(
+    builder: &mut paimon::table::ReadBuilder<'_>,
+    projection: &Option<Vec<String>>,
+    limit: Option<usize>,
+    filter: &Option<Predicate>,
+) {
+    if let Some(projection) = projection {
+        let cols: Vec<&str> = projection.iter().map(String::as_str).collect();
+        builder.with_projection(&cols);
+    }
+    if let Some(limit) = limit {
+        builder.with_limit(limit);
+    }
+    if let Some(filter) = filter {
+        builder.with_filter(filter.clone());
+    }
+}
+
+/// Extract a sequence of Python `Split` objects into core `DataSplit`s. Accepts
+/// any iterable (list/tuple/generator). Runs under the GIL since it touches
+/// Python objects. A non-iterable argument or a non-`Split` element raises
+/// `TypeError`.
+fn extract_splits(splits: &Bound<'_, PyAny>) -> PyResult<Vec<DataSplit>> {
+    let iter = splits
+        .try_iter()
+        .map_err(|_| PyTypeError::new_err("read() expects a sequence of Split objects"))?;
+    let mut out = Vec::new();
+    for item in iter {
+        let item = item?;
+        let split: PyRef<PySplit> = item
+            .extract()
+            .map_err(|_| PyTypeError::new_err("read() expects a sequence of Split objects"))?;
+        out.push(split.inner.clone());
+    }
+    Ok(out)
+}
 
 #[pyclass(name = "ReadBuilder", module = "pypaimon_rust.datafusion")]
 pub struct PyReadBuilder {
@@ -79,6 +120,15 @@ impl PyReadBuilder {
             filter: self.filter.clone(),
         }
     }
+
+    fn new_read(&self) -> PyTableRead {
+        PyTableRead {
+            table: Arc::clone(&self.table),
+            projection: self.projection.clone(),
+            limit: self.limit,
+            filter: self.filter.clone(),
+        }
+    }
 }
 
 #[pyclass(name = "TableScan", module = "pypaimon_rust.datafusion")]
@@ -96,21 +146,48 @@ impl PyTableScan {
         let splits = py.detach(|| {
             rt.block_on(async {
                 let mut builder = self.table.new_read_builder();
-                if let Some(projection) = &self.projection {
-                    let cols: Vec<&str> = projection.iter().map(String::as_str).collect();
-                    builder.with_projection(&cols);
-                }
-                if let Some(limit) = self.limit {
-                    builder.with_limit(limit);
-                }
-                if let Some(filter) = &self.filter {
-                    builder.with_filter(filter.clone());
-                }
+                apply_read_config(&mut builder, &self.projection, self.limit, &self.filter);
                 let plan = builder.new_scan().plan().await.map_err(to_py_err)?;
                 Ok::<_, PyErr>(plan.splits().to_vec())
             })
         })?;
         Ok(PyPlan { splits })
+    }
+}
+
+#[pyclass(name = "TableRead", module = "pypaimon_rust.datafusion")]
+pub struct PyTableRead {
+    table: Arc<Table>,
+    projection: Option<Vec<String>>,
+    limit: Option<usize>,
+    filter: Option<Predicate>,
+}
+
+#[pymethods]
+impl PyTableRead {
+    /// Read the given splits into a list of PyArrow RecordBatches.
+    fn read(&self, py: Python<'_>, splits: &Bound<'_, PyAny>) -> PyResult<Vec<Py<PyAny>>> {
+        let splits = extract_splits(splits)?;
+        let rt = runtime();
+        let batches = py.detach(|| {
+            rt.block_on(async {
+                let mut builder = self.table.new_read_builder();
+                apply_read_config(&mut builder, &self.projection, self.limit, &self.filter);
+                // Validate config (e.g. projection) before the empty-splits fast
+                // path so an invalid projection fails consistently regardless of
+                // how many splits are passed.
+                let read = builder.new_read().map_err(to_py_err)?;
+                if splits.is_empty() {
+                    return Ok(Vec::new());
+                }
+                let stream = read.to_arrow(&splits).map_err(to_py_err)?;
+                stream.try_collect::<Vec<_>>().await.map_err(to_py_err)
+            })
+        })?;
+        batches
+            .iter()
+            .map(|batch| Ok(batch.to_pyarrow(py)?.unbind()))
+            .collect()
     }
 }
 
