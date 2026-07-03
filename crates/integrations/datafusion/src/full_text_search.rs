@@ -191,6 +191,7 @@ impl TableProvider for FullTextSearchTableProvider {
             table,
             schema: &self.schema(),
             plan: &plan,
+            scan_trace: None,
             projection,
             pushed_predicate: None,
             limit,
