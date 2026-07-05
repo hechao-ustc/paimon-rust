@@ -50,6 +50,57 @@ ctx.sql("DROP TEMPORARY TABLE paimon.default.my_temp")
 
 For the full SQL reference, see the [SQL Integration docs](https://paimon.apache.org/docs/master/sql/).
 
+### Native Read / Write
+
+Beyond SQL, you can use the lower-level read and write APIs directly from Python.
+Time travel is supported via the `options` dict on `new_read_builder`.
+
+```python
+import pyarrow as pa
+from pypaimon_rust.datafusion import SQLContext, PaimonCatalog
+
+WAREHOUSE = "/tmp/paimon-warehouse"
+
+# --- DDL/DML via DataFusion SQLContext ---
+ctx = SQLContext()
+ctx.register_catalog("paimon", {"warehouse": WAREHOUSE})
+ctx.sql("CREATE SCHEMA paimon.my_db")
+ctx.sql("CREATE TABLE paimon.my_db.users (id INT, name STRING, PRIMARY KEY (id))")
+ctx.sql("INSERT INTO paimon.my_db.users VALUES (1, 'alice'), (2, 'bob')")
+catalog = PaimonCatalog({"warehouse": WAREHOUSE})
+table = catalog.get_table("my_db.users")
+
+# --- Read data ---
+read_builder = table.new_read_builder().with_projection(["id", "name"]).with_limit(100)
+scan = read_builder.new_scan()
+plan = scan.plan()
+batches = read_builder.new_read().read(plan.splits())
+
+print(f"\nRead: {batches[0].num_rows} rows")
+print(batches[0])
+
+# --- Write data, from a PyArrow RecordBatch ---
+batch = pa.record_batch(
+    [[3, 4], ["charlie", "diana"]],
+    schema=pa.schema([("id", pa.int32()), ("name", pa.utf8())]),
+)
+write_builder = table.new_write_builder()
+writer = write_builder.new_write()
+writer.write_arrow(batch)
+commit_messages = writer.prepare_commit()
+write_builder.new_commit().commit(commit_messages)
+
+# --- Time travel: read a past version ---
+# Supported options: scan.version, scan.timestamp-millis, scan.snapshot-id, or scan.tag-name
+read_builder_tt = table.new_read_builder({"scan.version": "2"})
+scan_tt = read_builder_tt.new_scan()
+plan_tt = scan_tt.plan()
+batches_tt = read_builder_tt.new_read().read(plan_tt.splits())
+
+print(f"\nRead: {batches_tt[0].num_rows} rows")
+print(batches_tt[0])
+```
+
 ## Setup
 
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/):
@@ -82,4 +133,4 @@ cd bindings/python
 
 ```shell
 make test
-```````
+```
