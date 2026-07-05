@@ -627,13 +627,20 @@ impl<'a> TableScan<'a> {
     /// Plan the full scan: resolve snapshot (via options or latest), then read manifests and build DataSplits.
     ///
     /// Time travel is resolved from table options:
-    /// - only one of `scan.version`, `scan.timestamp-millis` may be set
-    /// - `scan.version` → tag name (if exists) → snapshot id (if parseable) → error
+    /// - only one of `scan.version`, `scan.timestamp-millis`,
+    ///   `scan.snapshot-id`, `scan.tag-name` may be set
+    /// - `scan.version` → tag name (if exists) → snapshot id (if parseable) →
+    ///   error (ambiguous by design, like SQL `VERSION AS OF`)
+    /// - `scan.snapshot-id` → snapshot id only (never a tag lookup)
+    /// - `scan.tag-name` → tag name only (never parsed as a snapshot id)
     /// - `scan.timestamp-millis` → find the latest snapshot <= that timestamp
     /// - otherwise → read the latest snapshot
     ///
     /// Reference: [TimeTravelUtil.tryTravelToSnapshot](https://github.com/apache/paimon/blob/master/paimon-core/src/main/java/org/apache/paimon/table/source/snapshot/TimeTravelUtil.java)
+    /// for `scan.version`; the strict selectors mirror Java's typed
+    /// `scan.snapshot-id` / `scan.tag-name` handling.
     pub async fn plan(&self) -> crate::Result<Plan> {
+        self.ensure_query_auth_allowed()?;
         let data_evolution_read_field_ids = self.projected_read_field_ids()?;
         let snapshot = match self.resolve_snapshot().await? {
             Some(snapshot) => snapshot,
@@ -645,6 +652,7 @@ impl<'a> TableScan<'a> {
 
     /// Plan the full scan and return metadata-pruning trace counters.
     pub async fn plan_with_trace(&self) -> crate::Result<(Plan, ScanTrace)> {
+        self.ensure_query_auth_allowed()?;
         let data_evolution_read_field_ids = self.projected_read_field_ids()?;
         let mut trace = ScanTrace {
             limit: self.limit,
@@ -663,6 +671,13 @@ impl<'a> TableScan<'a> {
             )
             .await?;
         Ok((plan, trace))
+    }
+
+    /// Fail closed for a `query-auth.enabled` table: scan planning — including
+    /// `with_scan_all_files`, which read-facing system tables like `files` use —
+    /// exposes file paths, row counts, and stats the client can't authorize.
+    fn ensure_query_auth_allowed(&self) -> crate::Result<()> {
+        CoreOptions::new(self.table.schema().options()).ensure_read_authorized()
     }
 
     fn projected_read_field_ids(&self) -> crate::Result<Option<HashSet<i32>>> {
@@ -2006,6 +2021,122 @@ mod tests {
     }
 
     #[test]
+    fn test_data_file_matches_in_prunes_when_all_literals_out_of_range() {
+        let fields = int_field();
+        let file = test_data_file_meta(
+            int_stats_row(Some(10)),
+            int_stats_row(Some(20)),
+            vec![Some(0)],
+            5,
+        );
+        let predicate = PredicateBuilder::new(&fields)
+            .is_in("id", vec![Datum::Int(1), Datum::Int(30)])
+            .unwrap();
+
+        assert!(!data_file_matches_predicates(
+            &file,
+            &[predicate],
+            TEST_SCHEMA_ID,
+            &test_schema_fields(),
+        ));
+    }
+
+    #[test]
+    fn test_data_file_matches_in_keeps_when_any_literal_in_range() {
+        let fields = int_field();
+        let file = test_data_file_meta(
+            int_stats_row(Some(10)),
+            int_stats_row(Some(20)),
+            vec![Some(0)],
+            5,
+        );
+        let predicate = PredicateBuilder::new(&fields)
+            .is_in("id", vec![Datum::Int(1), Datum::Int(15), Datum::Int(30)])
+            .unwrap();
+
+        assert!(data_file_matches_predicates(
+            &file,
+            &[predicate],
+            TEST_SCHEMA_ID,
+            &test_schema_fields(),
+        ));
+    }
+
+    #[test]
+    fn test_data_file_matches_in_prunes_all_null_file() {
+        let fields = int_field();
+        let file = test_data_file_meta(int_stats_row(None), int_stats_row(None), vec![Some(5)], 5);
+        let predicate = PredicateBuilder::new(&fields)
+            .is_in("id", vec![Datum::Int(10)])
+            .unwrap();
+
+        assert!(!data_file_matches_predicates(
+            &file,
+            &[predicate],
+            TEST_SCHEMA_ID,
+            &test_schema_fields(),
+        ));
+    }
+
+    #[test]
+    fn test_data_file_matches_in_with_corrupt_stats_fails_open() {
+        let fields = int_field();
+        let file = test_data_file_meta(Vec::new(), Vec::new(), vec![Some(0)], 5);
+        let predicate = PredicateBuilder::new(&fields)
+            .is_in("id", vec![Datum::Int(30)])
+            .unwrap();
+
+        assert!(data_file_matches_predicates(
+            &file,
+            &[predicate],
+            TEST_SCHEMA_ID,
+            &test_schema_fields(),
+        ));
+    }
+
+    #[test]
+    fn test_data_file_matches_in_with_inverted_stats_fails_open() {
+        let fields = int_field();
+        let file = test_data_file_meta(
+            int_stats_row(Some(20)),
+            int_stats_row(Some(10)),
+            vec![Some(0)],
+            5,
+        );
+        let predicate = PredicateBuilder::new(&fields)
+            .is_in("id", vec![Datum::Int(15)])
+            .unwrap();
+
+        assert!(data_file_matches_predicates(
+            &file,
+            &[predicate],
+            TEST_SCHEMA_ID,
+            &test_schema_fields(),
+        ));
+    }
+
+    #[test]
+    fn test_data_file_matches_not_in_fails_open() {
+        let fields = int_field();
+        let file = test_data_file_meta(
+            int_stats_row(Some(10)),
+            int_stats_row(Some(20)),
+            vec![Some(0)],
+            5,
+        );
+        let predicate = PredicateBuilder::new(&fields)
+            .is_not_in("id", vec![Datum::Int(10), Datum::Int(20)])
+            .unwrap();
+
+        assert!(data_file_matches_predicates(
+            &file,
+            &[predicate],
+            TEST_SCHEMA_ID,
+            &test_schema_fields(),
+        ));
+    }
+
+    #[test]
     fn test_data_file_matches_is_null_prunes_when_null_count_is_zero() {
         let fields = int_field();
         let file = test_data_file_meta(
@@ -2564,5 +2695,39 @@ mod tests {
         assert_eq!(buckets.len(), 1);
         let bucket = *buckets.iter().next().unwrap();
         assert!((0..8).contains(&bucket));
+    }
+
+    #[tokio::test]
+    async fn test_plan_fails_closed_when_query_auth_enabled() {
+        // Every scan-planning path must fail closed, including `with_scan_all_files`
+        // (read-facing system tables like `files` use it to expose metadata).
+        let table = crate::table::query_auth_table();
+        let rb = table.new_read_builder();
+        for scan in [rb.new_scan(), rb.new_scan().with_scan_all_files()] {
+            let err = scan.plan().await.unwrap_err();
+            assert!(
+                matches!(err, crate::Error::Unsupported { ref message } if message.contains("query-auth.enabled")),
+                "scan planning must fail closed (scan_all_files or not)"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn test_dynamic_option_cannot_disable_query_auth_at_plan() {
+        // Copying the table with the option off must not weaken a stored `true`.
+        let table =
+            crate::table::query_auth_table().copy_with_options(std::collections::HashMap::from([
+                ("query-auth.enabled".to_string(), "false".to_string()),
+            ]));
+        let err = table
+            .new_read_builder()
+            .new_scan()
+            .plan()
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(err, crate::Error::Unsupported { ref message } if message.contains("query-auth.enabled")),
+            "a dynamic override must not disable query-auth"
+        );
     }
 }
