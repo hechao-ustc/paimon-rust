@@ -50,6 +50,41 @@ ctx.sql("DROP TEMPORARY TABLE paimon.default.my_temp")
 
 For the full SQL reference, see the [SQL Integration docs](https://paimon.apache.org/docs/master/sql/).
 
+### Native Read / Write
+
+Beyond SQL, you can use the lower-level read and write APIs directly from Python.
+Time travel is supported via the `options` dict on `new_read_builder`.
+
+```python
+from pypaimon_rust.datafusion import PaimonCatalog
+
+catalog = PaimonCatalog({"warehouse": "/tmp/paimon-warehouse"})
+
+# Table must already exist — create it via SQL, the REST API, or another client
+table = catalog.get_table("my_db.my_table")
+
+# Time travel: pass timestamp-millis, version, snapshot-id, or tag-name
+reader = (
+    table.new_read_builder({"scan.timestamp-millis": "1718208000000"})
+    .with_projection(["id", "name"])
+    .with_limit(100)
+    .new_read()
+)
+
+# Scan → Read: plan splits first, then read batches
+scan = table.new_read_builder().new_scan()
+plan = scan.plan()
+batches = reader.read(plan.splits())
+
+# Write: build → write Arrow batches → commit
+write_builder = table.new_write_builder()
+writer = write_builder.new_write()
+writer.write_arrow(batch)
+commit_messages = writer.prepare_commit()
+
+write_builder.new_commit().commit(commit_messages)
+```
+
 ## Setup
 
 Install [uv](https://docs.astral.sh/uv/getting-started/installation/):
@@ -82,4 +117,4 @@ cd bindings/python
 
 ```shell
 make test
-```````
+```
