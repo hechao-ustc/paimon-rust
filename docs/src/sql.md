@@ -25,8 +25,8 @@ under the License.
 
 ```toml
 [dependencies]
-paimon = "0.1.0"
-paimon-datafusion = "0.1.0"
+paimon = "0.2.0"
+paimon-datafusion = "0.2.0"
 datafusion = "53"
 tokio = { version = "1", features = ["full"] }
 ```
@@ -35,8 +35,8 @@ To query tables with Mosaic data files, enable the `mosaic` feature on both crat
 
 ```toml
 [dependencies]
-paimon = { version = "0.1.0", features = ["mosaic"] }
-paimon-datafusion = { version = "0.1.0", features = ["mosaic"] }
+paimon = { version = "0.2.0", features = ["mosaic"] }
+paimon-datafusion = { version = "0.2.0", features = ["mosaic"] }
 datafusion = "53"
 tokio = { version = "1", features = ["full"] }
 ```
@@ -572,8 +572,8 @@ Paimon supports full-text search via the Tantivy search engine. The `full_text_s
 
 ```toml
 [dependencies]
-paimon = { version = "0.1.0", features = ["fulltext"] }
-paimon-datafusion = { version = "0.1.0", features = ["fulltext"] }
+paimon = { version = "0.2.0", features = ["fulltext"] }
+paimon-datafusion = { version = "0.2.0", features = ["fulltext"] }
 ```
 
 ### Registration
