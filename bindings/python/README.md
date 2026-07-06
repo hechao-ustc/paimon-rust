@@ -92,7 +92,7 @@ write_builder.new_commit().commit(commit_messages)
 
 # --- Time travel: read a past version ---
 # Supported options: scan.version, scan.timestamp-millis, scan.snapshot-id, or scan.tag-name
-read_builder_tt = table.new_read_builder({"scan.version": "2"})
+read_builder_tt = table.new_read_builder({"scan.snapshot-id": "1"})
 scan_tt = read_builder_tt.new_scan()
 plan_tt = scan_tt.plan()
 batches_tt = read_builder_tt.new_read().read(plan_tt.splits())
