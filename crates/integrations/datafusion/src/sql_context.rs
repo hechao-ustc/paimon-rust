@@ -1040,7 +1040,6 @@ impl SQLContext {
                 }
                 AlterTableOperation::DropColumn {
                     column_names,
-                    if_exists: _,
                     ..
                 } => {
                     for col in column_names {
