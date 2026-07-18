@@ -24,7 +24,7 @@ The Python integration is a binding built on top of Apache Paimon Rust, allowing
 ## Prerequisites
 
 - Python 3.10 or later
-- Supported platforms: Linux (amd64, arm64), macOS (amd64, arm64)
+- Supported platforms: Linux (amd64, arm64), macOS (amd64, arm64), Windows (amd64)
 
 ## Installation
 
@@ -222,10 +222,10 @@ rb.with_case_sensitive(False)
 Filter push-down prunes data at two levels:
 
 1. **Scan planning** — skips partitions, buckets, and data files based on file-level statistics (min/max).
-2. **Read-side** — applies row-level filtering via Parquet native row filters for leaf predicates.
+2. **Read-side** — applies exact residual filtering, ensuring only rows that match the predicate are returned.
 
-!!! warning
-    Filter push-down is a **best-effort** optimization. The returned results may still contain rows that do not satisfy the filter condition. Callers should always apply residual filtering on the returned records to ensure correctness.
+!!! note
+    Filter push-down at the scan-planning level is **best-effort**: it may conservatively include files that do not contain matching rows. The read-side applies exact residual filtering and will not return rows that fail the predicate.
 
 ### Predicate Format
 
