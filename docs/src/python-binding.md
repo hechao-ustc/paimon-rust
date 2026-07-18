@@ -29,10 +29,10 @@ The Python integration is a binding built on top of Apache Paimon Rust, allowing
 ## Installation
 
 ```bash
-pip install pypaimon-rust
+pip install pypaimon-rust pyarrow
 ```
 
-The pre-built native library is embedded in the package and automatically loaded at runtime — no manual build step is needed.
+The pre-built native library is embedded in the package and automatically loaded at runtime — no manual build step is needed. [PyArrow](https://arrow.apache.org/docs/python/) is a required peer dependency and must be installed separately.
 
 ## Creating a Catalog
 
@@ -195,12 +195,15 @@ rb.with_projection(["id", "name"])
 
 ## Limit
 
-Use `with_limit` to cap the number of rows returned. A limit of `0` returns zero rows.
+Use `with_limit` to set a hint for the number of rows returned. A limit of `0` returns zero rows.
 
 ```python
 rb = table.new_read_builder()
 rb.with_limit(100)
 ```
+
+!!! warning
+    `with_limit` is a scan-planning hint, not an exact row cap. When all rows fall within a single split, the entire split is returned regardless of the limit value. Callers should apply application-level limiting if an exact upper bound is required.
 
 ## Case Sensitivity
 
@@ -210,6 +213,9 @@ Use `with_case_sensitive` to control whether column-name matching in projections
 rb = table.new_read_builder()
 rb.with_case_sensitive(False)
 ```
+
+!!! note
+    `with_case_sensitive` must be called **before** `with_filter` to affect predicate construction. The predicate is built using the case-sensitivity setting at the time `with_filter` is invoked; changing it afterward has no effect on an already-constructed predicate.
 
 ## Filter Push-Down
 
@@ -379,21 +385,29 @@ for stat in table.partition_stats():
 Register Python scalar UDFs into a `SQLContext`:
 
 ```python
-from pypaimon_rust.datafusion import SQLContext
+from pypaimon_rust.datafusion import SQLContext, udf
 import pyarrow as pa
 
 ctx = SQLContext()
+ctx.register_catalog("paimon", {"warehouse": "/tmp/paimon-warehouse"})
 
-def add_one(args):
-    # args is a tuple of PyArrow Arrays
-    arr = args[0]
-    return pa.array([v.as_py() + 1 for v in arr], type=pa.int32())
+batch = pa.record_batch([[1, None, 3]], names=["id"])
+ctx.register_batch("my_temp", batch)
 
-ctx.register_udf(
-    ctx.udf(add_one, [pa.int32()], pa.int32(), "immutable", name="add_one")
+def plus_ten(values):
+    # values is a PyArrow Array (not a tuple)
+    return pa.array(
+        [None if value is None else value + 10 for value in values.to_pylist()],
+        type=pa.int64(),
+    )
+
+ctx.register_udf(udf(plus_ten, [pa.int64()], pa.int64(), "volatile", "plus_ten"))
+
+batches = ctx.sql(
+    "SELECT plus_ten(id) AS id FROM paimon.default.my_temp ORDER BY id"
 )
-
-batches = ctx.sql("SELECT add_one(id) FROM paimon.my_db.t")
+for batch in batches:
+    print(batch)
 ```
 
 ## Complete Example
