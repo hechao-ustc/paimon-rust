@@ -1632,7 +1632,10 @@ value = datetime.datetime(2024, 1, 1, tzinfo=FloatingTz())",
                 let lits: Vec<i64> = (0..n).collect();
                 let dict = leaf_dict(py, "between", "id", &lits);
                 let err = dict_to_predicate(&dict, &fields, true).unwrap_err();
-                assert!(err.is_instance_of::<PyValueError>(py), "between with {n} lits");
+                assert!(
++                    err.is_instance_of::<PyValueError>(py),
++                    "between with {n} lits"
++                );
             }
         });
     }
@@ -1645,7 +1648,10 @@ value = datetime.datetime(2024, 1, 1, tzinfo=FloatingTz())",
                 let lits: Vec<i64> = (0..n).collect();
                 let dict = leaf_dict(py, "notBetween", "id", &lits);
                 let err = dict_to_predicate(&dict, &fields, true).unwrap_err();
-                assert!(err.is_instance_of::<PyValueError>(py), "notBetween with {n} lits");
+                assert!(
++                    err.is_instance_of::<PyValueError>(py),
++                    "notBetween with {n} lits"
++                );
             }
         });
     }
