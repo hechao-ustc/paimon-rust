@@ -1633,9 +1633,9 @@ value = datetime.datetime(2024, 1, 1, tzinfo=FloatingTz())",
                 let dict = leaf_dict(py, "between", "id", &lits);
                 let err = dict_to_predicate(&dict, &fields, true).unwrap_err();
                 assert!(
-+                    err.is_instance_of::<PyValueError>(py),
-+                    "between with {n} lits"
-+                );
+                    err.is_instance_of::<PyValueError>(py),
+                    "between with {n} lits"
+                );
             }
         });
     }
@@ -1649,9 +1649,9 @@ value = datetime.datetime(2024, 1, 1, tzinfo=FloatingTz())",
                 let dict = leaf_dict(py, "notBetween", "id", &lits);
                 let err = dict_to_predicate(&dict, &fields, true).unwrap_err();
                 assert!(
-+                    err.is_instance_of::<PyValueError>(py),
-+                    "notBetween with {n} lits"
-+                );
+                    err.is_instance_of::<PyValueError>(py),
+                    "notBetween with {n} lits"
+                );
             }
         });
     }
