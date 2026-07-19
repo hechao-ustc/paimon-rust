@@ -1777,11 +1777,27 @@ fn read_timestamp_value(input: &mut BlockInput<'_>, unit: TimeUnit) -> crate::Re
         TimeUnit::Millisecond => millis,
         TimeUnit::Microsecond => {
             let nanos = i64::from(input.read_var_u32()?);
-            millis * 1_000 + nanos / 1_000
+            millis
+                .checked_mul(1_000)
+                .and_then(|v| v.checked_add(nanos / 1_000))
+                .ok_or_else(|| Error::DataInvalid {
+                    message: format!(
+                        ".row timestamp microsecond conversion overflow: millis={millis}, nanos={nanos}"
+                    ),
+                    source: None,
+                })?
         }
         TimeUnit::Nanosecond => {
             let nanos = i64::from(input.read_var_u32()?);
-            millis * 1_000_000 + nanos
+            millis
+                .checked_mul(1_000_000)
+                .and_then(|v| v.checked_add(nanos))
+                .ok_or_else(|| Error::DataInvalid {
+                    message: format!(
+                        ".row timestamp nanosecond conversion overflow: millis={millis}, nanos={nanos}"
+                    ),
+                    source: None,
+                })?
         }
         TimeUnit::Second => millis / 1_000,
     })
@@ -3504,5 +3520,60 @@ mod tests {
             DataField::new(3, "g".to_string(), DataType::Double(DoubleType::new())),
         ])
         .unwrap();
+    }
+
+    #[test]
+    fn read_timestamp_rejects_overflow() {
+        // Millis = i64::MAX triggers overflow in microsecond/nanosecond conversion
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&i64::MAX.to_le_bytes()); // millis (8 bytes LE)
+        buf.push(0); // nanos_of_milli = 0 (varint 1 byte)
+
+        let new_input = || BlockInput {
+            data: &buf,
+            position: 0,
+            data_end: buf.len(),
+        };
+
+        // Microsecond path: millis * 1_000 overflows
+        let result = read_timestamp_value(&mut new_input(), TimeUnit::Microsecond);
+        assert!(matches!(result, Err(Error::DataInvalid { .. })));
+
+        // Nanosecond path: millis * 1_000_000 overflows
+        let result = read_timestamp_value(&mut new_input(), TimeUnit::Nanosecond);
+        assert!(matches!(result, Err(Error::DataInvalid { .. })));
+    }
+
+    #[test]
+    fn read_timestamp_accepts_boundary_values() {
+        // Maximum millis that still fits into microsecond precision
+        let max_safe_micros = i64::MAX / 1_000;
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&max_safe_micros.to_le_bytes());
+        buf.push(0);
+
+        let mut input = BlockInput {
+            data: &buf,
+            position: 0,
+            data_end: buf.len(),
+        };
+        let result = read_timestamp_value(&mut input, TimeUnit::Microsecond);
+        assert!(result.is_ok());
+
+        // Maximum millis that still fits into nanosecond precision
+        let max_safe_nanos = i64::MAX / 1_000_000;
+
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&max_safe_nanos.to_le_bytes());
+        buf.push(0);
+
+        let mut input = BlockInput {
+            data: &buf,
+            position: 0,
+            data_end: buf.len(),
+        };
+        let result = read_timestamp_value(&mut input, TimeUnit::Nanosecond);
+        assert!(result.is_ok());
     }
 }
